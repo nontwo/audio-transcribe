@@ -58,6 +58,31 @@ struct ClassGrouping {
 
 enum LibraryRequestError: Error { case unavailable, malformed }
 
+enum LibraryDisplayMode: Int {
+    case recent = 0, recorded = 1, trash = 2
+    var backendView: String { self == .trash ? "trash" : "active" }
+    var backendSort: String { self == .recorded ? "recorded" : "recent" }
+    var usesDateGroups: Bool { self == .recorded }
+}
+
+enum LibraryDisplayText {
+    static func generatedTime(_ iso: String?) -> String {
+        guard let iso else { return "生成时间未知" }
+        let parser = ISO8601DateFormatter()
+        parser.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        var date = parser.date(from: iso)
+        if date == nil { parser.formatOptions = [.withInternetDateTime]; date = parser.date(from: iso) }
+        guard let date else { return "生成时间未知" }
+        let formatter = DateFormatter(); formatter.locale = Locale(identifier: "zh_CN")
+        formatter.dateFormat = "yyyy-MM-dd HH:mm"; formatter.timeZone = .current
+        return "生成 " + formatter.string(from: date)
+    }
+    static func filenames(_ values: [String]) -> String {
+        guard let first = values.first else { return "录音文件名未记录" }
+        return values.count == 1 ? first : "\(first) 等 \(values.count) 个文件"
+    }
+}
+
 enum ReportPresentation {
     /// Remove only the recognized generated preamble, never class/source content.
     /// Edited or unfamiliar reports remain fully visible.

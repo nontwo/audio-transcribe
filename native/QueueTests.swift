@@ -56,9 +56,20 @@ import Foundation
         assert(ReportPresentation.readingBody(report, integrity: "modified") == nil)
         assert(ReportPresentation.readingBody(report, integrity: "unknown") == nil)
         assert(ReportPresentation.readingBody("# Unfamiliar report\n\n## Source\nPreserve everything.", integrity: "intact") == nil)
+        // Imported older recordings are ordered by the backend's generated time;
+        // rendering must compare actual instants, not mislabel UTC as local time.
+        let generated = LibraryDisplayText.generatedTime("2024-01-02T09:00:00Z")
+        assert(generated == LibraryDisplayText.generatedTime("2024-01-02T04:00:00-05:00"))
+        assert(generated == LibraryDisplayText.generatedTime("2024-01-02T09:00:00.000000+00:00"))
+        assert(generated != "生成时间未知")
+        assert(LibraryDisplayText.generatedTime(nil) == "生成时间未知")
+        assert(LibraryDisplayText.generatedTime("unknown") == "生成时间未知")
+        assert(LibraryDisplayText.filenames(["fixture.wav"]) == "fixture.wav")
+        assert(LibraryDisplayText.filenames(["fixture.wav", "second.wav"]).contains("2 个文件"))
         print("Queue tests passed: deterministic additions, duplicates, multiple-row reorder, invalid moves, cancellation/no-op.")
         print("Progress tests passed: no invented percentage, stage transitions, monotonic updates and multi-hour elapsed time.")
         print("Grouping tests passed: explicit boundaries preserve every index, split/merge, title fallback, and mixed/unknown dates.")
         print("Reader tests passed: only known intact preambles compact; all source warnings and text retained; edited/unknown reports remain full.")
+        print("Result display tests passed: UTC/offset/fractional export times identify the same local time; unknown dates and filenames remain explicit.")
     }
 }

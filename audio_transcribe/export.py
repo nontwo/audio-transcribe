@@ -16,7 +16,7 @@ from .engine import (digest, load_runtime, model_identity, new_id, now, run_sess
 from .evaluation import timestamp
 from .quality import assess_quality
 from .library import (export_directory, export_manifests, normalize_groups,
-                      rebuild_index, recording_time)
+                      rebuild_index, recording_time, report_is_trashed)
 from .timeline import audit_timeline, TimelineError
 from .storage import (import_sources, managed_source_path, read_doc, session_lock,
                       sha256_file, validate_id, validate_session, write_json)
@@ -356,11 +356,15 @@ def build_report(settings, paths, resolved, *, progress=None, events=None, retry
     for mpath in export_manifests(settings["roots"]["data"]):
         try:
             old = read_doc(mpath)
+            batch_id = validate_id(old.get("batch_id"), "report ID")
+            if batch_id != mpath.parent.name:
+                continue
         except (OSError, ValueError):
             # An unrelated damaged export is preserved, not a reason to lose this report.
             continue
         report = mpath.parent / "transcript-report.md"
         if (old.get("fingerprint") == fingerprint and report.is_file()
+                and not report_is_trashed(settings["roots"]["data"], batch_id)
                 and sha256_file(report) == old.get("report_sha256")):
             return {"state": status, "report": str(report), "batch_id": mpath.parent.name,
                     "selected": len(entries), "completed": completed, "failed": failed,

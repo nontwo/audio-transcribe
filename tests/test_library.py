@@ -25,13 +25,13 @@ class LibraryTests(unittest.TestCase):
             stream.writeframes(b"\0\0" * int(seconds * 16000))
         return str(path)
 
-    def saved_report(self, name="batch-fixture", entries=None, groups=None):
+    def saved_report(self, name="batch-fixture", entries=None, groups=None, created_at="2024-01-03T00:00:00Z"):
         path = self.root / "exports" / name
         path.mkdir(parents=True)
         report = path / "transcript-report.md"
         report.write_text("# Transcript Report\n\nSynthetic lecture text.\n", encoding="utf-8")
         entries = entries or [{"filename": "audio_240102_090000.wav", "state": "failed"}]
-        manifest = {"batch_id": name, "ordered_sources": entries, "created_at": "2024-01-03T00:00:00Z",
+        manifest = {"batch_id": name, "ordered_sources": entries, "created_at": created_at,
                     "selected": len(entries), "completed": 0, "failed": len(entries),
                     "report_sha256": storage.sha256_file(report)}
         if groups is not None:
@@ -190,6 +190,67 @@ class LibraryTests(unittest.TestCase):
         (path / "transcript-report.md").unlink()
         (path / "transcript-report.md").symlink_to(outside)
         self.assertEqual(library.list_library(self.settings)["reports"], [])
+
+    def test_trash_restore_preserve_artifacts_title_and_search_counts(self):
+        path = self.saved_report()
+        before = {p.name: p.read_bytes() for p in path.iterdir()}
+        library.library_request(self.settings, {"action": "rename", "report_id": "batch-fixture", "title": "Morning class"})
+        deleted = library.library_request(self.settings, {"action": "trash", "report_id": "batch-fixture"})
+        self.assertEqual(deleted["reports"], [])
+        self.assertEqual((deleted["active_count"], deleted["trash_count"]), (0, 1))
+        with self.assertRaises(ValueError):
+            library.read_report(self.settings, "batch-fixture")
+        trash = library.library_request(self.settings, {"action": "list", "view": "trash", "sort": "recent"})
+        self.assertEqual(trash["reports"][0]["title"], "Morning class")
+        self.assertEqual(trash["reports"][0]["filenames"], ["audio_240102_090000.wav"])
+        deleted_at = trash["reports"][0]["deleted_at"]
+        self.assertIsInstance(deleted_at, str)
+        self.assertEqual(library.read_report(self.settings, "batch-fixture", view="trash")["integrity"], "intact")
+        filtered = library.list_library(self.settings, "absent search term", view="trash")
+        self.assertEqual(filtered["reports"], [])
+        self.assertEqual(filtered["trash_count"], 1)
+        library.library_request(self.settings, {"action": "trash", "report_id": "batch-fixture"})
+        self.assertEqual(library.list_library(self.settings, view="trash")["reports"][0]["deleted_at"], deleted_at)
+        library.library_request(self.settings, {"action": "rename", "report_id": "batch-fixture", "title": "Renamed in trash", "view": "trash"})
+        self.assertTrue(library.report_is_trashed(self.root, "batch-fixture"))
+        restored = library.library_request(self.settings, {"action": "restore", "report_id": "batch-fixture"})
+        self.assertEqual(restored["reports"], [])
+        self.assertEqual((restored["active_count"], restored["trash_count"]), (1, 0))
+        active = library.list_library(self.settings)
+        self.assertEqual(active["reports"][0]["title"], "Renamed in trash")
+        self.assertIsNone(active["reports"][0]["deleted_at"])
+        self.assertEqual(storage.read_doc(self.root / "library" / "index.json")["reports"][0]["title"], "Renamed in trash")
+        self.assertEqual({p.name: p.read_bytes() for p in path.iterdir()}, before)
+        with self.assertRaises(ValueError):
+            library.read_report(self.settings, "batch-fixture", view="trash")
+
+    def test_recent_sort_uses_creation_time_instead_of_recording_date(self):
+        self.saved_report(name="batch-older-recording", entries=[{"filename": "audio_240101_090000.wav", "state": "failed"}], created_at="2024-01-05T12:00:00Z")
+        self.saved_report(name="batch-newer-recording", entries=[{"filename": "audio_240104_090000.wav", "state": "failed"}], created_at="2024-01-04T12:00:00Z")
+        recorded = library.list_library(self.settings)
+        recent = library.library_request(self.settings, {"action": "list", "sort": "recent"})
+        self.assertEqual(recorded["reports"][0]["id"], "batch-newer-recording")
+        self.assertEqual(recent["reports"][0]["id"], "batch-older-recording")
+        self.assertEqual(recent["sort"], "recent")
+        self.assertEqual(recent["active_count"], 2)
+
+    def test_recent_sort_respects_offsets_and_has_stable_ties(self):
+        self.saved_report(name="batch-a", created_at="2024-01-03T10:00:00+02:00")
+        self.saved_report(name="batch-b", created_at="2024-01-03T08:00:00Z")
+        self.saved_report(name="batch-c", created_at="2024-01-03T09:00:00Z")
+        result = library.list_library(self.settings, sort="recent")
+        self.assertEqual([report["id"] for report in result["reports"]], ["batch-c", "batch-b", "batch-a"])
+
+    def test_invalid_trash_request_does_not_change_any_annotation(self):
+        self.saved_report()
+        for request in ({"action": "trash", "report_id": "../private"},
+                        {"action": "trash", "report_id": "batch-absent"},
+                        {"action": "trash", "report_id": "batch-fixture", "view": "everything"},
+                        {"action": "trash", "report_id": "batch-fixture", "sort": "unknown"}):
+            with self.subTest(request=request), self.assertRaises(ValueError):
+                library.library_request(self.settings, request)
+        self.assertFalse((self.root / "library" / "annotations.json").exists())
+        self.assertEqual(library.list_library(self.settings)["active_count"], 1)
 
 
 if __name__ == "__main__":

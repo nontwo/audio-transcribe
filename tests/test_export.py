@@ -196,6 +196,40 @@ class ExportTests(unittest.TestCase):
         self.assertEqual(second["reused_transcripts"], 2)
         for p, value in before.items(): self.assertEqual(p.read_bytes(), value)
 
+    def test_trashed_report_is_not_reused_but_audio_and_asr_are_preserved(self):
+        paths = [self.source("audio_240102_090000.wav", 10)]
+        first = self.report(paths)
+        before = {p: p.read_bytes() for p in self.data.rglob("*") if p.is_file()}
+        library.library_request(self.settings, {"action": "trash", "report_id": first["batch_id"]})
+        with patch.object(export, "run_session", side_effect=AssertionError("Trashing a report must not discard cached ASR")):
+            second = self.report(paths)
+        self.assertNotEqual(first["report"], second["report"])
+        self.assertFalse(second["reused_report"])
+        self.assertEqual(second["reused_transcripts"], 1)
+        self.assertEqual(self.calls, 1)
+        self.assertEqual([r["id"] for r in library.list_library(self.settings)["reports"]], [second["batch_id"]])
+        self.assertEqual([r["id"] for r in library.list_library(self.settings, view="trash")["reports"]], [first["batch_id"]])
+        for path, content in before.items():
+            if path.parent.name != "library":
+                self.assertEqual(path.read_bytes(), content)
+        library.library_request(self.settings, {"action": "restore", "report_id": first["batch_id"]})
+        self.assertEqual(library.list_library(self.settings)["active_count"], 2)
+
+    def test_renamed_report_folder_cannot_abort_export_or_be_reused(self):
+        paths = [self.source("audio_240102_090000.wav", 10)]
+        for renamed in ("renamed report", "batch-renamed"):
+            first = self.report(paths)
+            folder = Path(first["report"]).parent
+            saved = {path.name: path.read_bytes() for path in folder.iterdir() if path.is_file()}
+            moved = folder.with_name(renamed)
+            folder.rename(moved)
+            with patch.object(export, "run_session", side_effect=AssertionError("Intact ASR should still be reused")):
+                replacement = self.report(paths)
+            self.assertFalse(replacement["reused_report"])
+            self.assertNotEqual(Path(replacement["report"]).parent, moved)
+            self.assertEqual({path.name: path.read_bytes() for path in moved.iterdir() if path.is_file()}, saved)
+        self.assertEqual(self.calls, 1)
+
     def test_existing_multi_source_session_is_not_reclassified(self):
         a, b = self.source("a.wav", 10), self.source("b.wav", 20)
         session, _, _ = storage.import_sources(self.data, [a, b], order_confirmed=True)

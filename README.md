@@ -7,12 +7,24 @@ Whisper large-v3. No transcription service or account is required.
 
 ## Everyday use
 
-1. Open **AudioTranscribe** from `~/Applications/AudioTranscribe.app`.
-2. Drop or select recordings in **New Transcription** and confirm their order.
-3. Review the proposed dates and class groups. Split or combine groups as needed.
-4. Click **Transcribe** and watch the actual decoder progress and elapsed time.
-5. Browse the result in **Library**, search the transcript, review flagged content,
-   or open the complete `transcript-report.md`.
+1. Click **Import recordings / 导入录音**. New files appear immediately in
+   **Tasks / 任务**, which shows their count, order and processing status.
+2. Click **Start transcription / 开始转录**, review the class groups, and confirm.
+   Decoder progress stays in Tasks; Results also links back to the active task.
+3. Completion opens the full text inside **Transcripts / 转录结果**. The default
+   **Recently generated / 最近生成** view puts newly produced results first,
+   even when the recording date is older. Each row shows filenames and export time.
+4. Select **By recording date / 按录音日期** for chronological class organization.
+   Search matches filenames, titles and transcript text.
+5. Remove a file or clear the Tasks queue to change only that queue. To remove a
+   generated report from Results, select **Move to Recently Deleted / 移到最近删除**.
+   Restore it from **Recently Deleted / 最近删除** at any time. This action does
+   not erase source recordings or ASR artifacts and does not reclaim their storage.
+
+New imports after a completed task create a fresh queue. Pending tasks and their
+states are restored when reopening the app; interrupted processing resumes only
+when requested. **View this result / 查看本次结果** opens the current task's output
+inside the app; opening a report file in another application is a separate action.
 
 Grouping is a suggestion, not speaker identification or proof that recordings
 belong to the same class. Unknown dates remain unknown. A complete batch report

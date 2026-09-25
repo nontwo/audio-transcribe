@@ -8,8 +8,9 @@ Whisper and FFmpeg subprocesses deny network access on macOS.
 Local data can be sensitive: recordings, filenames, transcript text, manual
 course labels, local paths, glossary terms and diagnostic manifests. Keep the
 data root outside this checkout. Library grouping and report exports stay under
-the selected data root. The app stores its queue and last report path in local
-macOS preferences. Open Report or Open Audio uses the user's chosen application;
+the selected data root. The app stores its queue, processing states and last report path in local
+macOS preferences. Recently Deleted is reversible library metadata: original
+audio, reports and ASR artifacts remain on disk until separately managed. Open Report or Open Audio uses the user's chosen application;
 that application's privacy behavior is separate.
 
 The source repository excludes all personal recordings, transcriptions, local

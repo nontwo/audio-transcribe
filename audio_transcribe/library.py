@@ -194,6 +194,34 @@ def _annotations(data_root):
     return read_doc(path).get("reports", {}) if path.is_file() else {}
 
 
+def report_is_trashed(data_root, report_id):
+    """Trash is a local visibility annotation, never deletion of saved artifacts."""
+    validate_id(report_id, "report ID")
+    return bool(_annotations(data_root).get(report_id, {}).get("deleted_at"))
+
+
+def _view_options(view, sort="recorded"):
+    if view not in {"active", "trash"}:
+        raise ValueError("Library view must be active or trash.")
+    if sort not in {"recent", "recorded"}:
+        raise ValueError("Library sort must be recent or recorded.")
+
+
+def _recent_key(report):
+    # Our created_at values are UTC. Respect an explicit offset in imported
+    # manifests too; malformed or zone-free values are not guessed from mtime.
+    created = report.get("created_at")
+    epoch = float("-inf")
+    if isinstance(created, str):
+        try:
+            value = dt.datetime.fromisoformat(created.replace("Z", "+00:00"))
+            if value.tzinfo is not None:
+                epoch = value.timestamp()
+        except ValueError:
+            pass
+    return epoch, report["id"]
+
+
 def _summary(manifest, path, annotations):
     entries = manifest.get("ordered_sources", [])
     groups = manifest.get("groups") or normalize_groups(entries)
@@ -219,7 +247,9 @@ def _summary(manifest, path, annotations):
             "review_required": review, "quality_status": quality.get("status", "review_required" if review else "unknown"),
             "accuracy_verified": quality.get("accuracy_verified", False), "state": manifest.get("state", "unknown"),
             "grouping_status": "confirmed" if all(g.get("confirmed") for g in groups) else "unconfirmed",
-            "created_at": manifest.get("created_at"), "groups": groups}
+            "created_at": manifest.get("created_at"), "groups": groups,
+            "filenames": [entry["filename"] for entry in entries],
+            "deleted_at": annotations.get(manifest["batch_id"], {}).get("deleted_at")}
 
 
 def _reports(data_root):
@@ -247,12 +277,17 @@ def _reports(data_root):
     return found
 
 
-def list_library(settings, query=""):
+def list_library(settings, query="", *, view="active", sort="recorded"):
+    _view_options(view, sort)
     if not isinstance(query, str):
         raise ValueError("Search query must be text.")
     query = query.casefold().strip()
     reports = []
-    for summary, manifest, path in _reports(settings["roots"]["data"]).values():
+    available = _reports(settings["roots"]["data"])
+    trash_count = sum(bool(summary.get("deleted_at")) for summary, _, _ in available.values())
+    for summary, manifest, path in available.values():
+        if bool(summary.get("deleted_at")) != (view == "trash"):
+            continue
         searchable = " ".join([summary["title"], *(str(d or "") for d in summary["dates"]),
                                 *(e["filename"] for e in manifest.get("ordered_sources", []))]).casefold()
         if query and query not in searchable:
@@ -262,7 +297,10 @@ def list_library(settings, query=""):
             except (OSError, UnicodeError):
                 continue
         reports.append(summary)
-    reports.sort(key=lambda r: (r["date"] or "", r["start_time"] or "", r["created_at"] or ""), reverse=True)
+    if sort == "recent":
+        reports.sort(key=_recent_key, reverse=True)
+    else:
+        reports.sort(key=lambda r: (r["date"] or "", r["start_time"] or "", r["created_at"] or "", r["id"]), reverse=True)
     dates = {}
     for report in reports:
         for date in report["dates"]:
@@ -272,19 +310,28 @@ def list_library(settings, query=""):
             dated = {**report, "date": date, "start_time": start}
             dates.setdefault(date, []).append(dated)
     for dated_reports in dates.values():
-        dated_reports.sort(key=lambda report: (report["start_time"] or "", report["created_at"] or ""), reverse=True)
-    return {"schema_version": LIBRARY_VERSION, "reports": reports,
+        dated_reports.sort(key=_recent_key if sort == "recent" else lambda report: (report["start_time"] or "", report["created_at"] or "", report["id"]), reverse=True)
+    return {"schema_version": LIBRARY_VERSION, "reports": reports, "view": view, "sort": sort,
+            "active_count": len(available) - trash_count, "trash_count": trash_count,
             "dates": [{"date": date, "label": date or "Unknown recording date", "reports": dates[date]}
                       for date in sorted(dates, key=lambda d: d or "", reverse=True)]}
 
 
-def rebuild_index(settings):
-    snapshot = list_library(settings)
-    write_json(Path(settings["roots"]["data"]) / "library" / "index.json", snapshot, overwrite=True)
-    return snapshot
+def rebuild_index(settings, *, locked=False):
+    root = Path(settings["roots"]["data"]) / "library"
+    root.mkdir(parents=True, exist_ok=True)
+    def rebuild():
+        snapshot = list_library(settings)
+        write_json(root / "index.json", snapshot, overwrite=True)
+        return snapshot
+    if locked:
+        return rebuild()
+    with _file_lock(root / ".library.lock", blocking=True):
+        return rebuild()
 
 
-def read_report(settings, report_id, query=""):
+def read_report(settings, report_id, query="", *, view="active"):
+    _view_options(view)
     if not isinstance(query, str):
         raise ValueError("Search query must be text.")
     validate_id(report_id, "report ID")
@@ -292,6 +339,8 @@ def read_report(settings, report_id, query=""):
     if not match:
         raise ValueError("Report is not available in the local library.")
     summary, manifest, path = match
+    if bool(summary.get("deleted_at")) != (view == "trash"):
+        raise ValueError("Report is not available in the selected library view.")
     report_path = path.parent / "transcript-report.md"
     text = report_path.read_text(encoding="utf-8")
     intact = sha256_file(report_path) == manifest.get("report_sha256")
@@ -330,19 +379,35 @@ def library_request(settings, request):
             raise ValueError("Select recordings to suggest grouping.")
         return propose_groups(paths, _known_recordings(settings["roots"]["data"]))
     if action == "list":
-        return list_library(settings, request.get("query", ""))
+        return list_library(settings, request.get("query", ""), view=request.get("view", "active"), sort=request.get("sort", "recorded"))
     if action == "read":
-        return read_report(settings, request.get("report_id"), request.get("query", ""))
-    if action == "rename":
+        return read_report(settings, request.get("report_id"), request.get("query", ""), view=request.get("view", "active"))
+    if action in {"rename", "trash", "restore"}:
         report_id = validate_id(request.get("report_id"), "report ID")
-        title = clean_title(request.get("title"))
+        view = request.get("view", "trash" if action == "restore" else "active")
+        sort = request.get("sort", "recorded")
+        query = request.get("query", "")
+        _view_options(view, sort)
+        if not isinstance(query, str):
+            raise ValueError("Search query must be text.")
+        title = clean_title(request.get("title")) if action == "rename" else None
         root = Path(settings["roots"]["data"]) / "library"
         root.mkdir(parents=True, exist_ok=True)
         with _file_lock(root / ".library.lock"):
             if report_id not in _reports(settings["roots"]["data"]):
                 raise ValueError("Report is not available in the local library.")
             records = _annotations(settings["roots"]["data"])
-            records[report_id] = {"title": title}
+            annotation = records.setdefault(report_id, {})
+            if action == "rename":
+                if bool(annotation.get("deleted_at")) != (view == "trash"):
+                    raise ValueError("Report is not available in the selected library view.")
+                annotation["title"] = title
+            elif action == "trash":
+                if not annotation.get("deleted_at"):
+                    annotation["deleted_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
+            else:
+                annotation.pop("deleted_at", None)
             write_json(root / "annotations.json", {"schema_version": LIBRARY_VERSION, "reports": records}, overwrite=True)
-            return rebuild_index(settings)
+            rebuild_index(settings, locked=True)
+            return list_library(settings, query, view=view, sort=sort)
     raise ValueError("Unknown local library action.")

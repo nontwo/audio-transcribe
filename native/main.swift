@@ -15,7 +15,7 @@ final class DropTarget: NSView {
     override init(frame: NSRect) {
         super.init(frame: frame)
         registerForDraggedTypes([.fileURL])
-        setAccessibilityLabel("Drop recordings here")
+        setAccessibilityLabel("将录音拖到这里，或点击导入录音")
     }
     required init?(coder: NSCoder) { fatalError() }
     override func draw(_ dirtyRect: NSRect) {
@@ -43,21 +43,22 @@ final class MainController: NSWindowController, NSWindowDelegate, NSTableViewDat
     let queue = RecordingQueue()
     let table = NSTableView()
     let drop = DropTarget()
-    let count = NSTextField(labelWithString: "No recordings selected")
-    let status = NSTextField(wrappingLabelWithString: "Add recordings, then drag rows into the desired order.")
+    let count = NSTextField(labelWithString: "尚未导入录音")
+    let status = NSTextField(wrappingLabelWithString: "导入录音后会显示在这里。确认顺序，再点击开始转录。")
     let spinner = NSProgressIndicator()
-    let choose = NSButton(title: "Choose Files…", target: nil, action: nil)
-    let clear = NSButton(title: "Clear List", target: nil, action: nil)
-    let start = NSButton(title: "Transcribe", target: nil, action: nil)
-    let cancel = NSButton(title: "Cancel", target: nil, action: nil)
-    let openReport = NSButton(title: "Open Report", target: nil, action: nil)
-    let reveal = NSButton(title: "Show in Finder", target: nil, action: nil)
+    let choose = NSButton(title: "导入录音…", target: nil, action: nil)
+    let clear = NSButton(title: "清空任务列表", target: nil, action: nil)
+    let start = NSButton(title: "开始转录", target: nil, action: nil)
+    let cancel = NSButton(title: "取消转录", target: nil, action: nil)
+    let openReport = NSButton(title: "查看本次结果", target: nil, action: nil)
+    let reveal = NSButton(title: "在访达中显示", target: nil, action: nil)
     let tabs = NSTabView()
     let library = LibraryController()
     var groupingSheet: GroupingSheet?
     var planning = false
     var process: Process?
     var reportURL: URL?
+    var taskFinished = false
     var stdoutBuffer = Data()
     var receivedTerminalEvent = false
     var cancelRequested = false
@@ -70,29 +71,54 @@ final class MainController: NSWindowController, NSWindowDelegate, NSTableViewDat
     let defaults = UserDefaults.standard
 
     init() {
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1100, height: 770),
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1100, height: 820),
             styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         window.title = "AudioTranscribe"
-        window.minSize = NSSize(width: 980, height: 720)
+        window.minSize = NSSize(width: 980, height: 760)
         window.setFrameAutosaveName("AudioTranscribeMainWindow")
         super.init(window: window)
         window.delegate = self
         buildView()
-        if let paths = defaults.stringArray(forKey: "SelectedFiles") {
-            queue.items = paths.map { Recording(url: URL(fileURLWithPath: $0)) }
-        }
         if let path = defaults.string(forKey: "LastReport"), FileManager.default.fileExists(atPath: path) {
             reportURL = URL(fileURLWithPath: path)
-            status.stringValue = "Your last report is ready. Add recordings to start a new report."
+        }
+        if let paths = defaults.stringArray(forKey: "SelectedFiles") {
+            var reportEntries: [[String: Any]] = []
+            if let reportURL,
+               let data = try? Data(contentsOf: reportURL.deletingLastPathComponent().appendingPathComponent("manifest.json")),
+               let manifest = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                reportEntries = manifest["ordered_sources"] as? [[String: Any]] ?? []
+            }
+            let saved = defaults.array(forKey: "QueueState") as? [[String: String]] ?? []
+            if QueuePersistence.reportMatches(paths, entries: reportEntries) {
+                taskFinished = true
+                status.stringValue = "本次任务已有结果，点击查看本次结果。导入新录音会新建一份任务列表。"
+            } else {
+                reportURL = nil
+                taskFinished = QueuePersistence.savedTaskFinished(paths, saved: saved, markedFinished: defaults.bool(forKey: "TaskFinished"))
+                if taskFinished { status.stringValue = "上次任务已处理，报告可在「转录结果」或「最近删除」查看。" }
+            }
+            queue.items = QueuePersistence.restore(paths, saved: saved, reportEntries: taskFinished ? reportEntries : [])
+        } else {
+            reportURL = nil
+        }
+        library.onImport = { [weak self] in self?.chooseFiles() }
+        library.onShowTasks = { [weak self] in self?.tabs.selectTabViewItem(withIdentifier: "queue") }
+        library.onReportTrashed = { [weak self] path in
+            guard let self, self.reportURL?.path == path else { return }
+            self.reportURL = nil
+            self.status.stringValue = "这份报告已移到最近删除，可在「转录结果 → 最近删除」恢复。"
+            self.persist(); self.refresh()
         }
         refresh()
         library.onRequeue = { [weak self] urls in
             guard let self, !self.editingLocked else { return }
             self.queue.items = urls.map { Recording(url: $0) }
-            self.reportURL = nil; self.persist(); self.refresh(); self.tabs.selectTabViewItem(at: 1)
+            self.reportURL = nil; self.taskFinished = false; self.persist(); self.refresh(); self.tabs.selectTabViewItem(withIdentifier: "queue")
             self.transcribe()
         }
-        library.reload(selectPath: reportURL?.path)
+        library.showRecentResults(selectPath: reportURL?.path)
+        tabs.selectTabViewItem(withIdentifier: !taskFinished && !queue.items.isEmpty ? "queue" : "library")
         window.center()
     }
     required init?(coder: NSCoder) { fatalError() }
@@ -109,10 +135,10 @@ final class MainController: NSWindowController, NSWindowDelegate, NSTableViewDat
             tabs.trailingAnchor.constraint(equalTo: windowContent.trailingAnchor, constant: -10),
             tabs.topAnchor.constraint(equalTo: windowContent.topAnchor, constant: 10),
             tabs.bottomAnchor.constraint(equalTo: windowContent.bottomAnchor, constant: -10)])
-        let libraryTab = NSTabViewItem(identifier: "library"); libraryTab.label = "Library"; libraryTab.view = library.view
-        let queueTab = NSTabViewItem(identifier: "queue"); queueTab.label = "New Transcription"
+        let libraryTab = NSTabViewItem(identifier: "library"); libraryTab.label = "转录结果"; libraryTab.view = library.view
+        let queueTab = NSTabViewItem(identifier: "queue"); queueTab.label = "任务"
         let content = NSView(); queueTab.view = content
-        tabs.addTabViewItem(libraryTab); tabs.addTabViewItem(queueTab)
+        tabs.addTabViewItem(queueTab); tabs.addTabViewItem(libraryTab)
         let root = NSStackView()
         root.orientation = .vertical; root.alignment = .leading; root.spacing = 16
         root.translatesAutoresizingMaskIntoConstraints = false
@@ -122,8 +148,8 @@ final class MainController: NSWindowController, NSWindowDelegate, NSTableViewDat
             root.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -24),
             root.topAnchor.constraint(equalTo: content.topAnchor, constant: 24),
             root.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -20)])
-        root.addArrangedSubview(label("AudioTranscribe", size: 24, weight: .semibold))
-        let subtitle = label("Add recordings, review class groups, then read your complete transcript in the Library.", size: 13)
+        root.addArrangedSubview(label("任务", size: 24, weight: .semibold))
+        let subtitle = label("新导入、等待和正在处理的录音都在这里。完成后到「转录结果」查看正文。", size: 13)
         subtitle.textColor = .secondaryLabelColor; root.addArrangedSubview(subtitle)
         drop.translatesAutoresizingMaskIntoConstraints = false
         root.addArrangedSubview(drop)
@@ -137,7 +163,7 @@ final class MainController: NSWindowController, NSWindowDelegate, NSTableViewDat
         let icon = NSImageView(image: NSImage(systemSymbolName: "waveform", accessibilityDescription: "Audio files")!)
         icon.contentTintColor = .controlAccentColor
         dropContents.addArrangedSubview(icon)
-        dropContents.addArrangedSubview(label("Drop recordings here", size: 16, weight: .medium))
+        dropContents.addArrangedSubview(label("将录音拖到这里，或点击导入录音", size: 16, weight: .medium))
         choose.target = self; choose.action = #selector(chooseFiles); choose.bezelStyle = .rounded
         dropContents.addArrangedSubview(choose)
         NSLayoutConstraint.activate([dropContents.centerXAnchor.constraint(equalTo: drop.centerXAnchor),
@@ -147,6 +173,8 @@ final class MainController: NSWindowController, NSWindowDelegate, NSTableViewDat
         clear.target = self; clear.action = #selector(clearFiles); clear.bezelStyle = .rounded
         count.font = NSFont.systemFont(ofSize: 12); count.textColor = .secondaryLabelColor
         root.addArrangedSubview(listBar); listBar.widthAnchor.constraint(equalTo: root.widthAnchor).isActive = true
+        let removeHint = label("移除或清空任务只影响此列表；原录音和已生成的转录结果会保留。", size: 11)
+        removeHint.textColor = .secondaryLabelColor; root.addArrangedSubview(removeHint)
         for (identifier, width) in [("number", 38.0), ("name", 432.0), ("state", 130.0), ("remove", 34.0)] {
             let col = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(identifier))
             col.width = width; col.minWidth = identifier == "name" ? 280 : width
@@ -159,7 +187,7 @@ final class MainController: NSWindowController, NSWindowDelegate, NSTableViewDat
         table.dataSource = self; table.delegate = self
         table.registerForDraggedTypes([reorderType, .fileURL])
         table.setDraggingSourceOperationMask(.move, forLocal: true)
-        table.setAccessibilityLabel("Ordered recordings")
+        table.setAccessibilityLabel("当前任务中的录音")
         let scroll = NSScrollView()
         scroll.documentView = table; scroll.hasVerticalScroller = true; scroll.borderType = .bezelBorder
         root.addArrangedSubview(scroll)
@@ -181,6 +209,8 @@ final class MainController: NSWindowController, NSWindowDelegate, NSTableViewDat
     }
     func persist() {
         defaults.set(queue.items.map { $0.url.path }, forKey: "SelectedFiles")
+        defaults.set(QueuePersistence.snapshot(queue.items), forKey: "QueueState")
+        defaults.set(taskFinished, forKey: "TaskFinished")
         defaults.set(reportURL?.path, forKey: "LastReport")
     }
     func refresh() {
@@ -190,21 +220,30 @@ final class MainController: NSWindowController, NSWindowDelegate, NSTableViewDat
         openReport.isHidden = reportURL == nil; reveal.isHidden = reportURL == nil
         drop.enabled = !editingLocked
         library.canRequeue = !editingLocked
-        count.stringValue = queue.items.isEmpty ? "No recordings selected" : "\(queue.items.count) \(queue.items.count == 1 ? "recording" : "recordings") · drag rows to reorder"
+        library.canImport = !editingLocked
+        tabs.tabViewItem(at: 0).label = queue.items.isEmpty ? "任务" : "任务 · \(queue.items.count)"
+        library.taskSummary = queue.items.isEmpty ? nil : running
+            ? "正在处理 \(queue.items.count) 个录音"
+            : !taskFinished ? "任务中有 \(queue.items.count) 个录音等待处理"
+            : "最近一次任务：\(queue.items.count) 个录音已处理"
+        count.stringValue = queue.items.isEmpty ? "尚未导入录音" : "本次任务：\(queue.items.count) 个录音 · 可拖动调整顺序"
+        start.title = taskFinished ? "再次处理本次任务" : "开始转录"
         table.reloadData()
     }
     @discardableResult func add(_ urls: [URL]) -> Bool {
         guard !editingLocked, !urls.isEmpty else { return false }
-        queue.add(urls); reportURL = nil
-        tabs.selectTabViewItem(at: 1)
-        status.stringValue = "Confirm the order, then click Transcribe."
+        // A completed batch stays in Results; a new import starts a fresh queue.
+        if taskFinished { queue.items.removeAll() }
+        queue.add(urls); reportURL = nil; taskFinished = false
+        tabs.selectTabViewItem(withIdentifier: "queue")
+        status.stringValue = "录音已加入任务。确认顺序后点击开始转录；完成后会自动显示正文。"
         persist(); refresh(); window?.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
         return true
     }
     @objc func chooseFiles() {
         guard !editingLocked, let window else { return }
         let panel = NSOpenPanel()
-        panel.title = "Choose Recordings"; panel.prompt = "Add Recordings"
+        panel.title = "导入录音"; panel.prompt = "添加到任务"
         panel.canChooseDirectories = false; panel.canChooseFiles = true; panel.allowsMultipleSelection = true
         panel.allowedContentTypes = extensions.compactMap { UTType(filenameExtension: $0) }
         panel.beginSheetModal(for: window) { [weak self] answer in
@@ -213,14 +252,14 @@ final class MainController: NSWindowController, NSWindowDelegate, NSTableViewDat
     }
     @objc func clearFiles() {
         guard !editingLocked else { return }
-        queue.items.removeAll(); reportURL = nil
-        status.stringValue = "Add recordings, then drag rows into the desired order."
+        queue.items.removeAll(); reportURL = nil; taskFinished = false
+        status.stringValue = "导入录音后会显示在这里。确认顺序，再点击开始转录。"
         persist(); refresh()
     }
     @objc func removeFile(_ button: NSButton) {
         guard !editingLocked, queue.items.indices.contains(button.tag) else { return }
-        queue.items.remove(at: button.tag); reportURL = nil
-        status.stringValue = queue.items.isEmpty ? "Add recordings to begin." : "Confirm the order, then click Transcribe."
+        queue.items.remove(at: button.tag); reportURL = nil; taskFinished = false
+        status.stringValue = queue.items.isEmpty ? "导入录音，创建新任务。" : "录音已加入任务。确认顺序后点击开始转录；完成后会自动显示正文。"
         persist(); refresh()
     }
     func numberOfRows(in tableView: NSTableView) -> Int { queue.items.count }
@@ -232,11 +271,11 @@ final class MainController: NSWindowController, NSWindowDelegate, NSTableViewDat
         let cell = NSTableCellView()
         let key = tableColumn?.identifier.rawValue ?? ""
         if key == "remove" {
-            let b = NSButton(image: NSImage(systemSymbolName: "xmark.circle", accessibilityDescription: "Remove \(item.url.lastPathComponent)")!, target: self, action: #selector(removeFile(_:)))
+            let b = NSButton(image: NSImage(systemSymbolName: "xmark.circle", accessibilityDescription: "从任务移除 \(item.url.lastPathComponent)（保留原文件）")!, target: self, action: #selector(removeFile(_:)))
             b.isBordered = false; b.tag = row; b.isEnabled = !editingLocked
             b.frame = NSRect(x: 2, y: 13, width: 24, height: 24); cell.addSubview(b); return cell
         }
-        let state = ["waiting":"Waiting", "checking":"Checking…", "processing":"Transcribing…", "completed":"Checks passed", "review_required":"Review needed", "failed":"Failed", "cancelled":"Cancelled"][item.state] ?? item.state
+        let state = ["waiting":"等待开始", "checking":"正在检查…", "processing":"正在转录…", "completed":"已完成", "review_required":"已生成 · 需复核", "failed":"失败 · 可重试", "cancelled":"已取消"][item.state] ?? item.state
         let text = key == "number" ? "\(row + 1)." : key == "name" ? item.url.lastPathComponent : state
         let field = label(text, size: 13, weight: key == "name" ? .medium : .regular)
         field.lineBreakMode = .byTruncatingMiddle; field.translatesAutoresizingMaskIntoConstraints = false
@@ -272,15 +311,15 @@ final class MainController: NSWindowController, NSWindowDelegate, NSTableViewDat
         if info.draggingSource as? NSTableView === table {
             let ids = Set((info.draggingPasteboard.pasteboardItems ?? []).compactMap { $0.string(forType: reorderType) })
             let positions = IndexSet(queue.items.indices.filter { ids.contains(queue.items[$0].id.uuidString) })
-            queue.move(positions, to: row); reportURL = nil
-            status.stringValue = "Confirm the order, then click Transcribe."
+            queue.move(positions, to: row); reportURL = nil; taskFinished = false
+            status.stringValue = "录音已加入任务。确认顺序后点击开始转录；完成后会自动显示正文。"
             persist(); refresh(); return !positions.isEmpty
         }
         return add(fileURLs(info.draggingPasteboard))
     }
     @objc func transcribe() {
         guard !editingLocked, !queue.items.isEmpty else { return }
-        planning = true; status.stringValue = "Checking recording dates and class continuity…"
+        planning = true; status.stringValue = "正在检查录音日期与课程分组…"
         spinner.startAnimation(nil); refresh()
         let files = queue.items.map { $0.url.path }
         library.client.request(["action": "plan", "files": files]) { [weak self] result in
@@ -289,14 +328,14 @@ final class MainController: NSWindowController, NSWindowDelegate, NSTableViewDat
             guard self.queue.items.map({ $0.url.path }) == files, let window = self.window else { self.refresh(); return }
             switch result {
             case .failure:
-                self.status.stringValue = "Could not inspect recording dates. Please try Transcribe again."
+                self.status.stringValue = "未能读取录音日期，请重试。"
             case .success(let plan):
                 let sheet = GroupingSheet(plan: plan); self.groupingSheet = sheet
                 sheet.completion = { [weak self] groups in
                     guard let self else { return }
                     self.groupingSheet = nil; self.refresh()
                     if let groups { self.beginTranscription(groups: groups) }
-                    else { self.status.stringValue = "Review cancelled. Your recording order is unchanged." }
+                    else { self.status.stringValue = "已返回任务列表，可以继续添加或移除录音。" }
                 }
                 if let sheetWindow = sheet.window { window.beginSheet(sheetWindow) }
             }
@@ -322,10 +361,11 @@ final class MainController: NSWindowController, NSWindowDelegate, NSTableViewDat
             child.arguments = ["-m", "audio_transcribe", "app-report", "--request", request.path]
             child.currentDirectoryURL = base
             child.standardInput = FileHandle.nullDevice; child.standardOutput = pipe; child.standardError = errorHandle
-            stdoutBuffer.removeAll(); receivedTerminalEvent = false; cancelRequested = false; reportURL = nil; activeIndex = nil
+            stdoutBuffer.removeAll(); receivedTerminalEvent = false; cancelRequested = false; reportURL = nil; taskFinished = false; activeIndex = nil
             currentProgress = nil
             for i in queue.items.indices { queue.items[i].state = "waiting"; queue.items[i].message = nil }
             try child.run(); process = child
+            persist()
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                 // One reader preserves JSON-line order and split UTF-8 bytes.
                 // EOF is consumed before the final UI transition.
@@ -341,8 +381,10 @@ final class MainController: NSWindowController, NSWindowDelegate, NSTableViewDat
                     self.process = nil; self.spinner.stopAnimation(nil)
                     self.progressTimer?.invalidate(); self.progressTimer = nil
                     if !self.receivedTerminalEvent {
-                        self.status.stringValue = self.cancelRequested ? "Cancelled. Completed files are preserved. Click Transcribe to resume." : "Processing stopped. Completed files are preserved. Please retry."
-                        if let i = self.activeIndex { self.queue.items[i].state = self.cancelRequested ? "cancelled" : "failed" }
+                        self.status.stringValue = self.cancelRequested ? "已取消，完成的文件已保留。点击开始转录可继续。" : "处理已停止，完成的文件已保留，可以重试。"
+                        if let i = self.activeIndex, ["waiting", "checking", "processing"].contains(self.queue.items[i].state) {
+                            self.queue.items[i].state = self.cancelRequested ? "cancelled" : "failed"
+                        }
                     }
                     self.persist(); self.refresh()
                     self.library.updateActions()
@@ -350,9 +392,9 @@ final class MainController: NSWindowController, NSWindowDelegate, NSTableViewDat
                 }
             }
             progressTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.refreshProgress() }
-            status.stringValue = "Preparing recordings…"; spinner.startAnimation(nil); refresh()
+            status.stringValue = "正在准备录音…"; spinner.startAnimation(nil); refresh()
         } catch {
-            process = nil; status.stringValue = "AudioTranscribe could not start. Rebuild the local app, then try again."
+            process = nil; status.stringValue = "未能启动转录，请检查本地运行环境后重试。"
             refresh()
         }
     }
@@ -368,25 +410,28 @@ final class MainController: NSWindowController, NSWindowDelegate, NSTableViewDat
                 }
                 activeIndex = i; queue.items[i].state = state; queue.items[i].message = value["message"] as? String
                 if !cancelRequested {
-                    status.stringValue = "Processing \(i+1) of \(queue.items.count)"
+                    status.stringValue = "正在处理第 \(i+1) / \(queue.items.count) 个文件"
                     refreshProgress()
                 }
+                persist()
                 table.noteHeightOfRows(withIndexesChanged: IndexSet(integer: i)); table.reloadData()
             } else if type == "progress", let i = value["index"] as? Int, i == activeIndex,
                       !receivedTerminalEvent, !cancelRequested {
                 currentProgress?.update(value)
                 refreshProgress()
             } else if type == "result", let path = value["report"] as? String {
-                receivedTerminalEvent = true; reportURL = URL(fileURLWithPath: path)
+                receivedTerminalEvent = true; reportURL = URL(fileURLWithPath: path); taskFinished = true
                 let done = value["completed"] as? Int ?? 0; let failed = value["failed"] as? Int ?? 0
                 let review = value["review_required"] as? Int ?? 0
-                status.stringValue = failed > 0 || review > 0 ? "Report ready: \(done) checks passed, \(review) need review, \(failed) unavailable. Read the quality notes in Library." : "Report ready · \(done) recordings processed. Listening review is still needed."
+                status.stringValue = failed > 0 || review > 0 ? "结果已生成：\(done) 个完成，\(review) 个需复核，\(failed) 个失败。点击查看本次结果。" : "\(done) 个录音已处理完成。点击查看本次结果，可阅读全文并核对音频。"
                 persist(); refresh()
-                library.reload(selectPath: path); tabs.selectTabViewItem(at: 0)
+                library.showRecentResults(selectPath: path); tabs.selectTabViewItem(withIdentifier: "library")
             } else if type == "cancelled" || type == "error" {
                 receivedTerminalEvent = true
-                status.stringValue = value["message"] as? String ?? "Processing stopped. Please retry."
-                if let i = activeIndex, queue.items[i].state != "completed" { queue.items[i].state = type == "cancelled" ? "cancelled" : "failed" }
+                status.stringValue = value["message"] as? String ?? "处理已停止，请重试。"
+                if let i = activeIndex, ["waiting", "checking", "processing"].contains(queue.items[i].state) {
+                    queue.items[i].state = type == "cancelled" ? "cancelled" : "failed"
+                }
             }
         }
     }
@@ -398,16 +443,17 @@ final class MainController: NSWindowController, NSWindowDelegate, NSTableViewDat
     }
     @objc func cancelWork() {
         guard let process, !cancelRequested else { return }
-        cancelRequested = true; status.stringValue = "Cancelling safely…"; cancel.isEnabled = false; process.terminate()
+        cancelRequested = true; status.stringValue = "正在取消，已完成的结果会保留…"; cancel.isEnabled = false; process.terminate()
     }
     @objc func openResult() {
         if let reportURL {
-            status.stringValue = NSWorkspace.shared.open(reportURL) ? "Report opened in your Markdown app." : "Could not open the report. Use Show in Finder to locate it."
+            library.showRecentResults(selectPath: reportURL.path)
+            tabs.selectTabViewItem(withIdentifier: "library")
         }
     }
     @objc func showResult() { if let reportURL { NSWorkspace.shared.activateFileViewerSelecting([reportURL]) } }
     func windowShouldClose(_ sender: NSWindow) -> Bool {
-        if running { status.stringValue = "Cancel the current transcription before closing."; return false }
+        if running { status.stringValue = "请先取消当前转录，再关闭窗口。"; return false }
         return true
     }
 }
@@ -420,13 +466,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         appMenu.addItem(.separator()); appMenu.addItem(withTitle: "Quit AudioTranscribe", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         appItem.submenu = appMenu; menu.addItem(appItem)
         let fileItem = NSMenuItem(); let fileMenu = NSMenu(title: "File")
-        let chooseItem = NSMenuItem(title: "Choose Files…", action: #selector(MainController.chooseFiles), keyEquivalent: "o")
+        let chooseItem = NSMenuItem(title: "导入录音…", action: #selector(MainController.chooseFiles), keyEquivalent: "o")
         chooseItem.target = controller; fileMenu.addItem(chooseItem); fileItem.submenu = fileMenu; menu.addItem(fileItem)
         let editItem = NSMenuItem(); let editMenu = NSMenu(title: "Edit")
         for (name, action, key) in [("Cut", "cut:", "x"), ("Copy", "copy:", "c"), ("Paste", "paste:", "v"), ("Select All", "selectAll:", "a")] {
             editMenu.addItem(withTitle: name, action: Selector(action), keyEquivalent: key)
         }
-        let find = NSMenuItem(title: "Find in Transcript", action: #selector(NSTextView.performFindPanelAction(_:)), keyEquivalent: "f")
+        let find = NSMenuItem(title: "在转录正文中查找", action: #selector(NSTextView.performFindPanelAction(_:)), keyEquivalent: "f")
         find.tag = Int(NSFindPanelAction.showFindPanel.rawValue); find.target = controller.library.transcript
         editMenu.addItem(.separator()); editMenu.addItem(find)
         editItem.submenu = editMenu; menu.addItem(editItem); NSApp.mainMenu = menu

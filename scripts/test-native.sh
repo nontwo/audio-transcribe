@@ -7,3 +7,6 @@ trap 'rm -rf "$TEST_BUILD"' EXIT HUP INT TERM
   "$ROOT/native/Queue.swift" "$ROOT/native/Progress.swift" "$ROOT/native/Library.swift" \
   "$ROOT/native/QueueTests.swift" -o "$TEST_BUILD/native-tests"
 "$TEST_BUILD/native-tests"
+/usr/bin/xcrun swiftc -swift-version 5 -module-cache-path "$TEST_BUILD/module-cache" \
+  "$ROOT/native/Queue.swift" "$ROOT/native/TaskTests.swift" -o "$TEST_BUILD/task-tests"
+"$TEST_BUILD/task-tests"
