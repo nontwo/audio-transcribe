@@ -1,0 +1,13 @@
+schema_version: 1
+kind: speaker
+id: example-speaker
+label: null
+language: en
+notes: ''
+# Include only terms manually supplied or verified from relevant materials.
+terms: []
+asr: {}
+calibration_state: uncalibrated
+provenance: 'Generic template. Configuration only, not a voiceprint or training.'
+evaluation_refs: []
+recipes: []

@@ -1,0 +1,32 @@
+name: Tests
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  macos:
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Install isolated test dependencies
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install -r requirements-dev.txt
+      - name: Build local app and provision media decoder
+        run: .venv/bin/python scripts/build-app.py
+      - name: Python fixtures
+        run: .venv/bin/python -m pytest -q
+      - name: Native logic checks
+        run: sh scripts/test-native.sh
+      - name: Verify local signature
+        run: codesign --verify --deep --strict native/build/AudioTranscribe.app

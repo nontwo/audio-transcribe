@@ -1,0 +1,14 @@
+schema_version: 1
+kind: capture
+id: example-capture
+label: null
+language: en
+notes: ''
+device: null
+placement: null
+room: null
+# Optional preprocessing keys: channel, candidate, peak_dbfs, max_gain_db,
+# gain_db, vad, filtering. Gain is measured afresh under the selected policy.
+preprocessing: {}
+evidence: []
+applicability: []
